@@ -129,3 +129,5 @@ dmypy.json
 
 # user data / database files
 media/
+
+.env
