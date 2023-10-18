@@ -8,6 +8,7 @@ def dict_factory(cursor, row):
         d[col[0]] = row[idx]
     return d
 
+
 def start_db():
     con = sl.connect('test.db')
     # открываем базу
@@ -40,8 +41,8 @@ def create(message):
     con = sl.connect('test.db')
     sql = 'INSERT INTO users (chatid, name, term1, term2, term3) values(?, ?, ?, ?, ?)'
 
-    # chatid = str(message.from_user.id)
-    chatid = random.randint(1, 1000)
+    chatid = str(message.from_user.id)
+    # chatid = random.randint(1, 1000)
 
     name = str(message.from_user.username)
 
@@ -52,6 +53,7 @@ def create(message):
     # добавляем с помощью запроса данные
     with con:
         con.executemany(sql, data)
+    return get_user(message)
 
 
 def is_existed(message):
@@ -83,7 +85,6 @@ def list_users(term=None):
         with con:
             cur.execute(sql)
             records = cur.fetchall()
-            print(records)
             return records
     else:
 
@@ -93,7 +94,6 @@ def list_users(term=None):
         sql = f'SELECT * FROM users WHERE {term} = TRUE'
         cur.execute(sql)
         records = cur.fetchall()
-        print(records)
         return records
 
 
@@ -134,7 +134,6 @@ def update_term(message, term):
             return True
     else:
         raise ValueError(f'TERM {term} NOT EXIST')
-
 
 
 if __name__ == '__main__':
