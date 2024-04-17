@@ -27,8 +27,10 @@ class AdminState(StatesGroup):
 
 @admin_router.message(Command("admin"))
 async def command_admin_handler(message: Message) -> None:
-    admins = os.getenv("ADMINS").split()
-    creator = os.getenv("CREATOR")
+    # admins = os.getenv("ADMINS").split()
+    admins = os.environ["ADMINS"].split()
+    # creator = os.getenv("CREATOR")
+    creator = os.environ["CREATOR"]
     print(f'ADMINS: {admins}')
 
     await message.answer(f"Your chat.id: {message.chat.id}")
