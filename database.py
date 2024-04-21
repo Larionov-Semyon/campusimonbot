@@ -1,5 +1,16 @@
+import os
 import sqlite3 as sl
-import random
+from functools import wraps
+from datetime import date
+
+# Take the token from the .env file
+from dotenv import load_dotenv
+dotenv_path = os.path.join(os.path.dirname(__file__), '.env')
+if os.path.exists(dotenv_path):
+    load_dotenv(dotenv_path)
+
+# Take path of database
+DATAPATH = os.environ["DATAPATH"]
 
 
 def dict_factory(cursor, row):
@@ -9,64 +20,88 @@ def dict_factory(cursor, row):
     return d
 
 
-def start_db():
-    con = sl.connect('test.db')
+def connect_db(func):
+    """Декоратор подключения и отключения БД"""
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        conn = sl.connect(DATAPATH)
+        result = func(conn=conn, *args, **kwargs)
+        conn.close()
+        return result
+    return wrapper
+
+
+@connect_db
+def start_db(conn):
     # открываем базу
-    with con:
+    with conn:
         # получаем количество таблиц с нужным нам именем
-        data = con.execute("select count(*) from sqlite_master where type='table' and name='users'")
+        data = conn.execute("select count(*) from sqlite_master where type='table' and name='users'")
         for row in data:
             # если таких таблиц нет
             if row[0] == 0:
-                # создаём таблицу для товаров
-                with con:
-                    con.execute("""
+                # создаём таблицу для пользователей
+                with conn:
+                    conn.execute("""
                         CREATE TABLE users (
                             chatid VARCHAR(20) NOT NULL UNIQUE,
+                            username VARCHAR(50),
                             name VARCHAR(100),
-                            term1 BOOLEAN,
-                            term2 BOOLEAN,
-                            term3 BOOLEAN
+                            lastname VARCHAR(100),
+                            registrationdate VARCHAR(20),
+                            
+                            is_blocked BOOLEAN,
+                            
+                            exhibition BOOLEAN,
+                            meeting BOOLEAN,
+                            educational BOOLEAN,
+                            science BOOLEAN,
+                            career BOOLEAN,
+                            networking BOOLEAN,
+                            forum BOOLEAN
                         );
                     """)
 
     # выводим содержимое таблицы на экран
-    with con:
-        data = con.execute("SELECT * FROM users")
+    with conn:
+        data = conn.execute("SELECT * FROM users")
         for row in data:
             print(row)
 
 
-def create(message):
-    con = sl.connect('test.db')
-    sql = 'INSERT INTO users (chatid, name, term1, term2, term3) values(?, ?, ?, ?, ?)'
-
+@connect_db
+def create(message, conn=None):
     chatid = str(message.from_user.id)
-    # chatid = random.randint(1, 1000)
+    username = str(message.from_user.username)
+    name = str(message.from_user.first_name)
+    lastname = str(message.from_user.last_name)
+    registrationdate = str(date.today())
 
-    name = str(message.from_user.username)
-
+    request = 'INSERT INTO users (chatid, username, name, lastname, registrationdate, is_blocked, ' \
+              'exhibition, meeting, educational, science, career, networking, forum) ' \
+              'values(?, ?, ?, ?, ?, ?,' \
+              ' ?, ?, ?, ?, ?, ?, ?)'
     data = [
-        (chatid, name, False, False, False)
+        (chatid, username, name, lastname, registrationdate, False, True, True, True, True, True, True, True)
     ]
 
     # добавляем с помощью запроса данные
-    with con:
-        con.executemany(sql, data)
+    with conn:
+        conn.executemany(request, data)
     return get_user(message)
 
 
-def is_existed(message):
-    con = sl.connect('test.db')
-    cur = con.cursor()
+@connect_db
+def is_existed(message, conn=None):
+    cur = conn.cursor()
 
     chatid = str(message.from_user.id)
     sql = f'SELECT COUNT(*) FROM users WHERE users.chatid = {chatid}'
 
-    with con:
+    with conn:
         cur.execute(sql)
         records = cur.fetchall()
-        print(records, records[0][0])
+        print(records, len(records), records[0][0] == 0)
         if records[0][0] == 0:
             print('NOT EXIST')
             return 0
@@ -74,21 +109,21 @@ def is_existed(message):
             return 1
 
 
-def list_users(term=None):
-    con = sl.connect('test.db')
-    con.row_factory = dict_factory
-    cur = con.cursor()
+@connect_db
+def list_users(term=None, conn=None):
+    conn.row_factory = dict_factory
+    cur = conn.cursor()
 
     if term is None:
         sql = 'SELECT * FROM users '
 
-        with con:
+        with conn:
             cur.execute(sql)
             records = cur.fetchall()
             return records
     else:
 
-        if not term in ['term1', 'term2', 'term3']:
+        if not term in ['exhibition', 'meeting', 'educational', 'science', 'career', 'networking', 'forum']:
             print('NOT available TERM')
 
         sql = f'SELECT * FROM users WHERE {term} = TRUE'
@@ -97,25 +132,39 @@ def list_users(term=None):
         return records
 
 
-def get_user(message):
-    con = sl.connect('test.db')
-    con.row_factory = dict_factory
-    cur = con.cursor()
+@connect_db
+def get_user(message, conn=None):
+    conn.row_factory = dict_factory
+    cur = conn.cursor()
 
     chatid = str(message.from_user.id)
     sql = f'SELECT * FROM users WHERE users.chatid = {chatid}'
 
-    with con:
+    with conn:
         cur.execute(sql)
         records = cur.fetchall()
         print(records)
         return records[0]
 
 
-def update_term(message, term):
-    con = sl.connect('test.db')
-    con.row_factory = dict_factory
-    cur = con.cursor()
+@connect_db
+def get_user_from_chatid(chatid, conn=None):
+    conn.row_factory = dict_factory
+    cur = conn.cursor()
+
+    sql = f'SELECT * FROM users WHERE users.chatid = {chatid}'
+
+    with conn:
+        cur.execute(sql)
+        records = cur.fetchall()
+        print(records)
+        return records[0]
+
+
+@connect_db
+def update_term(message, term, conn=None):
+    conn.row_factory = dict_factory
+    cur = conn.cursor()
 
     user = get_user(message)
     if term in user:
@@ -128,7 +177,7 @@ def update_term(message, term):
             b = True
         sql = f'UPDATE users SET {term} = {b} WHERE chatid = {chatid}'
 
-        with con:
+        with conn:
             cur.execute(sql)
             print("Successfully updated")
             return True
@@ -136,5 +185,49 @@ def update_term(message, term):
         raise ValueError(f'TERM {term} NOT EXIST')
 
 
+@connect_db
+def update_term(user, term, conn=None):
+    conn.row_factory = dict_factory
+    cur = conn.cursor()
+    if term in user:
+        chatid = str(user['chatid'])
+
+        b = user[term]
+        if b == 1:
+            b = False
+        else:
+            b = True
+        sql = f'UPDATE users SET {term} = {b} WHERE chatid = {chatid}'
+
+        with conn:
+            cur.execute(sql)
+            print("Successfully updated")
+            return True
+    else:
+        raise ValueError(f'TERM {term} NOT EXIST')
+
+
+# @connect_db
+# def local_create(conn=None):
+#     chatid = ''
+#     username = ''
+#     name = ''
+#     lastname = ''
+#     registrationdate = str(date.today())
+#
+#     request = 'INSERT INTO users (chatid, username, name, lastname, registrationdate, is_blocked, ' \
+#               'exhibition, meeting, educational, science, career, networking, forum) ' \
+#               'values(?, ?, ?, ?, ?, ?,' \
+#               ' ?, ?, ?, ?, ?, ?, ?)'
+#     data = [
+#         (chatid, username, name, lastname, registrationdate, False, True, True, True, True, True, True, True)
+#     ]
+#
+#     # добавляем с помощью запроса данные
+#     with conn:
+#         conn.executemany(request, data)
+
+
 if __name__ == '__main__':
     start_db()
+    # local_create()

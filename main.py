@@ -6,6 +6,9 @@ from aiogram.enums import ParseMode
 
 from handlers.start import start_router
 from handlers.admin import admin_router
+from handlers.question import question_router
+from handlers.echo import echo_router
+# from handlers.constants import
 
 # Take the token from the .env file
 from dotenv import load_dotenv
@@ -25,13 +28,18 @@ async def main() -> None:
     dp.include_routers(
         start_router,
         admin_router,
+        question_router,
+        echo_router,
     )
 
     # Initialize Bot instance with a default parse mode which will be passed to all API calls
     bot = Bot(TOKEN, parse_mode=ParseMode.HTML)
 
-    # # Пропускаем накопившиеся апдейты и запускаем polling
+    # # Skip the accumulated updates and start polling
     # await bot.delete_webhook(drop_pending_updates=True)
+
+    creator = os.getenv("CREATOR")
+    await bot.send_message(chat_id=creator, text=f'START BOT')
 
     # And the run events dispatching
     await dp.start_polling(bot)

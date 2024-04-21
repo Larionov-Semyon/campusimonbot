@@ -1,8 +1,10 @@
 import os
 import logging
+from datetime import date
+import json
 
 from aiogram import Router, F, Bot
-from aiogram.filters import Command
+from aiogram.filters import Command, BaseFilter
 from aiogram.types import Message
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -11,60 +13,92 @@ from aiogram.types import (
     Message,
     ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
+    InlineKeyboardMarkup,
 )
 from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import AiogramError, TelegramForbiddenError
+from aiogram.utils.media_group import MediaGroupBuilder
 
-from database import create, is_existed, list_users, get_user, update_term
+from database import create, is_existed, list_users, get_user, update_term, get_user_from_chatid
+from handlers.constants import toggles, get_admins, get_creator
+from filters.filter_admin import AdminFilter
+
 
 admin_router = Router()
+# проверка что пользователь является администратором
+admin_router.message.filter(AdminFilter(get_admins()))
 
 
 class AdminState(StatesGroup):
     selection = State()
     write_post = State()
+    waiting = State()
     sending = State()
 
 
 @admin_router.message(Command("admin"))
 async def command_admin_handler(message: Message) -> None:
-    # admins = os.getenv("ADMINS").split()
-    admins = os.environ["ADMINS"].split()
-    # creator = os.getenv("CREATOR")
-    creator = os.environ["CREATOR"]
-    print(f'ADMINS: {admins}')
+    """Command /admin"""
+    creator = get_creator()
 
-    await message.answer(f"Your chat.id: {message.chat.id}")
+    # отправка списка админов
     if str(message.chat.id) == creator:
-        await message.answer(f'{admins}')
-    if str(message.chat.id) in admins:
-        await message.answer('Successfully!')
+        await message.answer(f'{get_admins()}')
+
+    # отправка списка доступных админам команд
+    text_message = f'Команды доступные админам:\n\n' \
+                   f'/send_message - отправить пост\n\n' \
+                   f'/stat - статистика'
+    await message.answer(text_message)
+
+
+@admin_router.message(Command('stat'))
+async def command_stat_handler(message: Message) -> None:
+    """Command /stat. Sending application usage statistics"""
+    list_all_users = list_users()
+    text_message = f'Всего users - {len(list_all_users)}\n\n'
+
+    text_message += 'Количество подписанных на разные tags:\n'
+    ans = {}
+    for toggle in toggles.keys():
+        lst = list_users(toggle)
+        ans[toggle] = len(lst)
+    text_message += '\n'.join([f'{toggle} - {ans[toggle]}' for toggle in toggles])
+    text_message += '\n\n'
+
+    last_user = list_all_users[-1]
+    text_message += f'Last user: {last_user["chatid"]} - {last_user["username"]}\n' \
+                    f'Дата регистрации: {last_user["registrationdate"]}'
+
+    await message.answer(text_message)
 
 
 @admin_router.message(Command("send_message"))
 async def message_send_handler(message: Message, state: FSMContext) -> None:
-    admins = os.getenv("ADMINS").split()
-    if str(message.chat.id) in admins:
-        await state.set_state(AdminState.selection)
-        user = get_user(message)
-        await message.answer(
-            f'Выбери категории для отправки',
-            reply_markup=ReplyKeyboardMarkup(
-                keyboard=[
-                    [KeyboardButton(text="Далее"),]
-                ],
-                resize_keyboard=True,
-            ),
-        )
-        await message.answer(
-            f'<b>Выбери категории для отправки:</b>\n\n'
-            f'Выберите интересующие вас направления:\n\n'
-            f'Выставки\n'
-            f'{"✅ Включено" if user["term1"] else "⛔️ Выключено"} - /toggle_term1\n\n'
-            f'Собрания\n'
-            f'{"✅ Включено" if user["term2"] else "⛔️ Выключено"} - /toggle_term2\n\n'
-            f'Познавательное\n'
-            f'{"✅ Включено" if user["term3"] else "⛔️ Выключено"} - /toggle_term3\n\n'
-        )
+    await state.set_state(AdminState.selection)
+    user = get_user(message)
+    await message.answer(
+        f'<b>Выбери категории для отправки</b>\n\n'
+        + '\n'.join([
+            f'{toggles[key]}\n'
+            f'{"✅ Включено" if user[key] else "⛔️ Выключено"} - /toggle_{key}\n'
+            for key in toggles]),
+        reply_markup=ReplyKeyboardMarkup(
+            keyboard=[
+                [KeyboardButton(text="Далее"), ]
+            ],
+            resize_keyboard=True,
+        ),
+    )
+
+
+@admin_router.message(AdminState.selection, F.text.startswith('/toggle_'))
+async def message_toggle_handler(message: Message, state: FSMContext) -> None:
+    data = message.text[8:]
+    print(data)
+    user = get_user(message)
+    update_term(user, data)
+    await message_send_handler(message, state)
 
 
 @admin_router.message(AdminState.selection, F.text.casefold() == "далее")
@@ -75,8 +109,16 @@ async def process__write_post(message: Message, state: FSMContext) -> None:
         'Напиши пост:',
         reply_markup=ReplyKeyboardRemove(),
     )
-    # await show_summary(message=message, data=data, positive=False)
-    # await message.reply(text=message.text)
+    await state.update_data(photo=[], video=[], document=[])
+
+
+@admin_router.message(AdminState.selection, F.text.casefold() != "далее")
+async def process__write_post(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer(
+        'Отмена',
+        reply_markup=ReplyKeyboardRemove(),
+    )
 
 
 @admin_router.message(Command("cancel"))
@@ -100,27 +142,52 @@ async def cancel_handler(message: Message, state: FSMContext) -> None:
 
 @admin_router.message(AdminState.write_post)
 async def process_name(message: Message, state: FSMContext, bot: Bot) -> None:
-    if message.text is None:
-        photo = message.photo[-1]
-        photo_id = photo.file_id
-        file = await bot.get_file(photo_id)
-        file_url = file.file_path
-        print(f'message {message.text=} {message.caption=} {photo}')
-        await state.update_data(caption=message.caption, photo=photo_id)
-    else:
-        await state.update_data(text=message.text)
-    await state.set_state(AdminState.sending)
+    print('----------------')
+    print(*message)
+
+    data = await state.get_data()
+
+    if message.text is not None:
+        # print(f'text {message.html_text}')
+        data['text'] = message.html_text
+    if message.caption is not None and 'caption' not in data:
+        print(f'caption {message.html_text}')
+        data['caption'] = message.html_text
+    if message.photo is not None:
+        # print(f'{message.photo[0].file_id=}')
+        data['photo'].append(message.photo[0].file_id)
+    if message.video is not None:
+        data['video'].append(message.video.file_id)
+    if message.document is not None:
+        data['document'].append(message.document.file_id)
+
+    print(f'{data=}')
+    await state.update_data(data)
+    print('----------------')
+    await state.set_state(AdminState.waiting)
+
+    await message.answer(
+        'Нажмите далее',
+        reply_markup=ReplyKeyboardMarkup(
+            keyboard=[
+                [KeyboardButton(text="Далее"), ]
+            ],
+            resize_keyboard=True,
+        ),
+    )
+
+
+@admin_router.message(AdminState.waiting)
+async def process(message: Message, state: FSMContext, bot: Bot):
+
+    await message.answer(f'Так будет выглядеть ваше сообщение:')
+
+    data = await state.get_data()
+    print(f'waiting {data=}')
 
     user = get_user(message)
-    data = await state.get_data()
-    try:
-        if 'text' in data:
-            await bot.send_message(chat_id=user['chatid'], text=data['text'])
-        elif 'photo' in data:
-            # photo = InputFile(data['photo'], 'rb')
-            await bot.send_photo(chat_id=user['chatid'], photo=data['photo'], caption=data['caption'])
-    except TelegramBadRequest:
-        await message.answer('Тут должен был быть пост, но что-то пошло не по плану')
+
+    await _send_message(bot, data, user['chatid'])
 
     await message.answer(
         f'Отправить?',
@@ -135,6 +202,29 @@ async def process_name(message: Message, state: FSMContext, bot: Bot) -> None:
         ),
     )
 
+    await state.set_state(AdminState.sending)
+
+
+async def _send_message(bot: Bot, data, chat_id):
+    if 'text' in data:
+        await bot.send_message(chat_id=chat_id, text=data['text'], reply_markup=ReplyKeyboardRemove())
+    else:
+        if 'caption' in data:
+            caption = data['caption']
+        else:
+            caption = None
+        media_group = MediaGroupBuilder(caption=caption)
+        for photo_id in data['photo']:
+            print(f'{photo_id=}')
+            media_group.add_photo(photo_id)
+        for video_id in data['video']:
+            print(f'{video_id=}')
+            media_group.add_video(video_id)
+        for doc_id in data['document']:
+            print(f'{doc_id=}')
+            media_group.add_document(doc_id)
+        await bot.send_media_group(chat_id=chat_id, media=media_group.build())
+
 
 @admin_router.message(AdminState.sending, F.text.casefold() == "no")
 async def process_dont_like_write_bots(message: Message, state: FSMContext) -> None:
@@ -145,11 +235,11 @@ async def process_dont_like_write_bots(message: Message, state: FSMContext) -> N
         "Вы не отправили сообщение",
         reply_markup=ReplyKeyboardRemove(),
     )
-    # await show_summary(message=message, data=data, positive=False)
 
 
 @admin_router.message(AdminState.sending, F.text.casefold() == "yes")
-async def process_like_write_bots(message: Message, state: FSMContext, bot: Bot) -> None:
+async def process_sending(message: Message, state: FSMContext, bot: Bot) -> None:
+    creator = get_creator()
 
     await message.reply(
         "Отправляем сообщения",
@@ -159,38 +249,42 @@ async def process_like_write_bots(message: Message, state: FSMContext, bot: Bot)
     data = await state.get_data()
     print(f'data {data}')
 
-    user = get_user(message)
-    lst = []
-    if user['term1'] == 1 and user['term2'] == 1 and user['term3'] == 1:
-        lst = list_users()
-    else:
-        if user['term1'] == 1:
-            lst += list_users('term1')
-        if user['term2'] == 1:
-            lst += list_users('term2')
-        if user['term3'] == 1:
-            lst += list_users('term3')
+    sender = get_user(message)
 
+    # получение списка уникальных id юзеров которые подписаны на теги рассылки
     ans = []
-    for l in lst:
-        print('l', l)
-        ans.append(l['chatid'])
+    for toggle in toggles.keys():
+        if sender[toggle] == 1:
+            lst = list_users(toggle)
+            ans += [dict_user['chatid'] for dict_user in lst if get_user]
     ans = list(set(ans))
-
     print(ans)
 
-    checker = {'all': len(ans), 'good': 0, 'bad': 0}
+    # начало отправки рассылки
+    checker = {'all': len(ans), 'good': 0, 'bad': 0, 'is_blocked': 0}
     for user_id in ans:
-        print(f'SENDING {user}')
+        print(f'SENDING {user_id}')
         try:
-            if 'text' in data:
-                await bot.send_message(chat_id=user_id, text=data['text'])
-            elif 'photo' in data:
-                # photo = InputFile(data['photo'], 'rb')
-                await bot.send_photo(chat_id=user_id, photo=data['photo'], caption=data['caption'])
+            await _send_message(bot, data, user_id)
+
+            user = get_user_from_chatid(user_id)
+            if user['is_blocked'] == 1:
+                update_term(user, 'is_blocked')
 
             checker['good'] += 1
-        except TelegramBadRequest:
+
+        except TelegramForbiddenError:
+            checker['bad'] += 1
+            checker['is_blocked'] += 1
+
+            user = get_user_from_chatid(user_id)
+            if user['is_blocked'] == 0:
+                update_term(user, 'is_blocked')
+
+        except AiogramError as E:
+            print(E)
+            await bot.send_message(chat_id=creator, text=f'ERROR - {date.today()} - {E}')
+            await message.reply(text=f'ERROR - {date.today()} - {F}')
             checker['bad'] += 1
 
     await state.clear()
@@ -198,3 +292,4 @@ async def process_like_write_bots(message: Message, state: FSMContext, bot: Bot)
         f'Готово {checker}',
         reply_markup=ReplyKeyboardRemove(),
     )
+    await bot.send_message(chat_id=creator, text=f'Отчет отправки поста {sender["username"]}\n{checker}')
